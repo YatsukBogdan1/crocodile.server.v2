@@ -24,3 +24,13 @@ declare type UserMessageFromSocket = {
   userId: number,
   tableId: number
 }
+
+declare type DrawImageData = {
+  tableId: number,
+  userId: number,
+  x: number,
+  y: number,
+  type: DrawType,
+  size: number,
+  color: string
+}

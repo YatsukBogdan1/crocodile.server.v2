@@ -47,7 +47,6 @@ app.post('/login', (req, res) => {
     });
   }
 
-  if (DEBUG) logMessage('New user connected', username)
   const userId = addNewUser(username, socketId);
   let tableId;
   const table = getTableWithFreeSeats();
@@ -98,29 +97,32 @@ app.get('/table/:tableId/messages', (req, res) => {
 const addUserToTable = (userId: number, tableId: number) => {
   const tableIndex = getTableIndexById(tableId);
   if (tableIndex === -1) {
-    if (DEBUG) logMessage(`User not added to table. No table with id=${tableId}`)
     return;
   }
   tables[tableIndex].userIds.push(userId);
-  if (DEBUG) logMessage('User added to table', tables[tableIndex])
 }
 
-const startGameOnTable = (tableId: number) => {
+const startGameOnTable = (tableId: number, painterId?: number) => {
   const tableIndex = getTableIndexById(tableId);
   if (tableIndex === -1) return;
 
   const table = tables[tableIndex];
-  const randomIndex = getRandomInt(0, table.userIds.length - 1);
-  const painterId = table.userIds[randomIndex];
+  let _painterId;
+  if (painterId == null) {
+    const randomIndex = getRandomInt(0, table.userIds.length - 1);
+    _painterId = table.userIds[randomIndex];
+  } else {
+    _painterId = painterId;
+  }
+  
   let painter;
-  tables[tableIndex].painterId = painterId;
+  tables[tableIndex].painterId = _painterId;
   const word = getRandomWord();
   tables[tableIndex].word = word;
-  if (DEBUG) logMessage('Game started', tables[tableIndex])
   table.userIds.forEach((userId) => {
     const user = getUserById(userId);
     if (user) {
-      if (userId === painterId) {
+      if (userId === _painterId) {
         painter = user;
         io.to(user.socketId).emit('gameStarted', { isPainter: true, word });
       } else {
@@ -148,7 +150,6 @@ const addNewUser = (username: string, socketId: string) => {
   };
 
   users.push(newUser);
-  if (DEBUG) logMessage('User added', newUser)
   usersCounter++;
   return userId;
 }
@@ -165,7 +166,6 @@ const addNewTable = () => {
   };
   tables.push(newTable);
   tablesCounter++;
-  if (DEBUG) logMessage('Table added', newTable)
   return tableId;
 }
 
@@ -191,7 +191,6 @@ const appendMessageToTable = (tableId: number, message: Message) => {
   if (tableIndex === -1) return;
   
   tables[tableIndex].messages.push(message);
-  if (DEBUG) logMessage('Message added to table', tables[tableIndex]);
 }
 
 const sendMessageToTable = (tableId: number, message: Message) => {
@@ -201,12 +200,11 @@ const sendMessageToTable = (tableId: number, message: Message) => {
 
   table.userIds.forEach((userId) => {
     const user = getUserById(userId);
-    if (user && user !== message.userId) {
+    if (user && user.socketId) {
       io.to(user.socketId).emit('message', message);
     }
   });
 
-  if (DEBUG) logMessage('Message sent to users', tableId);
 }
 
 const getFormatedMessageFromSocket = (data: UserMessageFromSocket): ?Message => {
@@ -235,7 +233,6 @@ const finishGameOnTable = (tableId: number, winnerId: number) => {
   const table = tables[tableIndex];
   tables[tableIndex].painterId = null;
   tables[tableIndex].word = null;
-  if (DEBUG) logMessage('Game finished', tables[tableIndex])
   table.userIds.forEach((userId) => {
     const user = getUserById(userId);
     if (user) {
@@ -243,44 +240,68 @@ const finishGameOnTable = (tableId: number, winnerId: number) => {
         io.to(user.socketId).emit('gameFinished', { isWinner: true });
         const systemMessage = `Winner: ${user.username}`;
         sendSystemMessageToTable(tableId, systemMessage);
-        if (DEBUG) logMessage(systemMessage)
       } else {
         io.to(user.socketId).emit('gameFinished', { isWinner: false });
       }
     }
   });
-  setTimeout(() => startGameOnTable(tableId), 1000);
+  setTimeout(() => startGameOnTable(tableId, winnerId), 1000);
 }
 
 const sendSystemMessageToTable = (tableId: number, text: string) => sendMessageToTable(tableId, getSystemMessageObject(text));
-const onMessageFromSocket = (tableId: number, message: Message) => {
+const onMessageFromSocket = (data: UserMessageFromSocket) => {
+  const {tableId} = data;
+
+  const table = getTableById(tableId);
+  if (!table) return;
+
+  const message = getFormatedMessageFromSocket(data);
+  if (!message) return;
+
   sendMessageToTable(tableId, message);
   if (isMessageRightWord(tableId, message.text) && message.userId != null) {
     finishGameOnTable(tableId, message.userId);
   }
 }
 
-io.on('connection', socket => {
-  
-  // socket.on('clearCanvas', function(from){});
-  socket.on('message', (data: UserMessageFromSocket) => {
-    if (DEBUG) logMessage('Message by user', data)
-    const table = getTableById(data.tableId);
-    if (!table) return;
-    const message = getFormatedMessageFromSocket(data);
-    if (!message) return;
+const onSocketDraw = (data: DrawImageData) => {
+  const table = getTableById(data.tableId);
+  if (!table || table.painterId !== data.userId) return;
 
-    onMessageFromSocket(data.tableId, message);
-    // if (msg == current_word){
-    //   painter = from;
-    //   current_word = words[getRandomInt(0,words.length-1)];
-    //   io.emit('painterChoosed', painter);
-    // }
+  table.userIds.forEach((userId) => {
+    const user = getUserById(userId);
+    if (user && userId !== data.userId) {
+      io.to(user.socketId).emit('drawImage', {
+        x: data.x,
+        y: data.y,
+        color: data.color,
+        size: data.size,
+        type: data.type
+      });
+    }
   });
-  socket.on('showImage', function(from, action){
-    io.emit('showImage', from, action);
-  });
+}
+
+
+io.on('connection', socket => {
+  socket.on('message', onMessageFromSocket);
+  socket.on('drawImage', onSocketDraw);
   socket.on('notifyUser', function(user){
     io.emit('notifyUser', user);
   });
+});
+
+const readline = require('readline');
+readline.emitKeypressEvents(process.stdin);
+process.stdin.setRawMode(true);
+
+process.stdin.on('keypress', (str, key) => {
+  if (key.ctrl && key.name === 'c') {
+    process.exit();
+  } else {
+    switch(key.name) {
+      case 't': console.log(tables); return;
+      case 'u': console.log(users); return;
+    }
+  }
 });
